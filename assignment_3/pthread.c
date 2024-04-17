@@ -1,8 +1,13 @@
-#include <syslog.h>
+#define _GNU_SOURCE
 #include <pthread.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <sched.h>
+#include <unistd.h>
+#include <syslog.h>
+#include <sys/sysinfo.h>
+#include <sys/types.h>
+
 
 #define NUM_THREADS 128
 
@@ -19,6 +24,10 @@ typedef struct
 //
 pthread_t threads[NUM_THREADS];
 threadParams_t threadParams[NUM_THREADS];
+pthread_attr_t rt_sched_attr[NUM_THREADS];
+struct sched_param rt_param[NUM_THREADS];
+struct sched_param main_param;
+
 
 /* myThread function: submits a message to the Syslog facility. */
 void *counterThread(void *threadp)
@@ -50,18 +59,56 @@ void uname(void)
 /* entry point to the program */
 int main (int argc, char *argv[])
 {
+   int rc;
+   int rt_max_prio;
    int i;
+   int numberOfProcessors, coreid;
+   pid_t mainpid;
+   cpu_set_t threadcpu;
+   
+   
    uname();
+   
+   
+   numberOfProcessors = get_nprocs_conf();
+   
+   mainpid=getpid();
+   rt_max_prio = sched_get_priority_max(SCHED_FIFO);
+   
+   rc=sched_getparam(mainpid, &main_param);
+   main_param.sched_priority=rt_max_prio;
+   
+   
+   
+   
+   if(rc=sched_setscheduler(mainpid, SCHED_FIFO, &main_param) < 0)
+	       perror("******** WARNING: sched_setscheduler. Run with SUDO\n");
+
+
 
    // starts a new thread in the calling process.
    for(i=0; i < NUM_THREADS; i++)
-
    {
+       coreid=i%numberOfProcessors;
+       
+       CPU_ZERO(&threadcpu);
+       CPU_SET(coreid, &threadcpu);
+       
+       rc=pthread_attr_init(&rt_sched_attr[i]);
+       rc=pthread_attr_setinheritsched(&rt_sched_attr[i], PTHREAD_EXPLICIT_SCHED);
+       rc=pthread_attr_setschedpolicy(&rt_sched_attr[i], SCHED_FIFO);
+       rc=pthread_attr_setaffinity_np(&rt_sched_attr[i], sizeof(cpu_set_t), &threadcpu);
+       
+       rt_param[i].sched_priority=rt_max_prio-(i%(rt_max_prio-1))-1;
+       rc=pthread_attr_setschedparam(&rt_sched_attr[i], &rt_param[i]);
+       
+       
        threadParams[i].threadIdx=i;
-       pthread_create(&threads[i],   // pointer to thread descriptor
-                      (void *)0,     // use default attributes
-                      counterThread, // thread function entry point
-                      (void *)&(threadParams[i]) // parameters to pass in
+       
+       pthread_create(&threads[i],                // pointer to thread descriptor
+                      &rt_sched_attr[i],          // use AFFINITY AND SCHEDULER attributes
+                      counterThread,              // thread function entry point
+                      (void *)&(threadParams[i])  // parameters to pass in
                      );
    }
 
